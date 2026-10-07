@@ -1,6 +1,5 @@
-name: Enterprise CI Pipeline 
+name: Enterprise CI Pipeline
 
- 
 # ─────────────────────────────────────────────
 # Trigger
 # ─────────────────────────────────────────────
@@ -19,22 +18,22 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment'
+        description: "Target environment"
         required: true
-        default: 'development'
+        default: "development"
         type: choice
         options:
           - development
           - staging
           - production
       deploy_tests:
-        description: 'Run integration tests?'
+        description: "Run integration tests?"
         required: false
         default: true
         type: boolean
 
 # ─────────────────────────────────────────────
-# Default Permissions (Least Privilege)
+# Default Permissions
 # ─────────────────────────────────────────────
 permissions:
   contents: read
@@ -56,7 +55,11 @@ concurrency:
 # ─────────────────────────────────────────────
 env:
   NODE_VERSION: "22"
-  IMAGE_NAME:  ${{ secrets.DOCKER_USER }}/zomato_new
+
+  # FIXED:
+  # Your GitHub secret is USERNAME, not DOCKER_USER
+  IMAGE_NAME: ${{ secrets.USERNAME }}/zomato_new
+
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
@@ -68,6 +71,7 @@ jobs:
     name: Build React Application
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     defaults:
       run:
         shell: bash
@@ -145,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 30
-  
+
     permissions:
       contents: read
       security-events: write
@@ -161,10 +165,9 @@ jobs:
           name: artifact-1
           path: .
 
-      # - name: Run Gitleaks
-      #   uses: gitleaks/gitleaks-action@v3
-      #   env:
-      #     NEW_GITHUB_TOKEN: ${{ secrets.GT }}
+      # ───────────────────────────────────────
+      # Trivy
+      # ───────────────────────────────────────
 
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
@@ -194,11 +197,19 @@ jobs:
         with:
           sarif_file: ./trivy-fs.sarif
 
+      # ───────────────────────────────────────
+      # Dockerfile Lint
+      # ───────────────────────────────────────
+
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
           failure-threshold: warning
+
+      # ───────────────────────────────────────
+      # Docker Buildx
+      # ───────────────────────────────────────
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -211,19 +222,29 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
+      # ───────────────────────────────────────
+      # Build Docker Image
+      # ───────────────────────────────────────
+
       - name: Build Docker Image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
+
+          # We load the image locally and push it manually later
           push: false
+          load: true
+
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ env.IMAGE_NAME }}:latest
+
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new
+
           provenance: false
-          load: true
+
           labels: |
             org.opencontainers.image.title=Zomato
             org.opencontainers.image.source=${{ github.repository }}
@@ -231,10 +252,18 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.run_id }}
 
+      # ───────────────────────────────────────
+      # Update Docker Cache
+      # ───────────────────────────────────────
+
       - name: Update Docker Cache
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      # ───────────────────────────────────────
+      # Verify Docker Image
+      # ───────────────────────────────────────
 
       - name: Verify Docker Image
         run: |
@@ -242,16 +271,28 @@ jobs:
           docker image inspect \
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
 
+      # ───────────────────────────────────────
+      # Docker Hub Login
+      # ───────────────────────────────────────
+
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
-           username: ${{ secrets. USERNAME }}
-           password: ${{ secrets. PASSWORD }}
+          username: ${{ secrets.USERNAME }}
+          password: ${{ secrets.PASSWORD }}
+
+      # ───────────────────────────────────────
+      # Push Docker Image
+      # ───────────────────────────────────────
 
       - name: Push Docker Image
         run: |
-            docker push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-            docker push ${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          docker push ${{ env.IMAGE_NAME }}:latest
+
+      # ───────────────────────────────────────
+      # Smoke Test
+      # ───────────────────────────────────────
 
       - name: Smoke Test Container
         run: |
@@ -259,11 +300,17 @@ jobs:
             --name zomato-test \
             -p 3000:3000 \
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
           sleep 20
+
           docker ps
           docker logs zomato-test
 
+      # ───────────────────────────────────────
+      # Cleanup
+      # ───────────────────────────────────────
+
       - name: Cleanup
         if: always()
-        run: docker rm -f zomato-test || true
-
+        run: |
+          docker rm -f zomato-test || true
